@@ -23,12 +23,19 @@ type Expense = {
   paidBy: string;
   category: string;
   date: string;
+  createdAt: string;
+};
+
+type DeletedExpense = Expense & {
+  deletedAt: string;
+  deleteReason: 'individual';
 };
 
 type StoredData = {
   groupName: string;
   members: string[];
   expenses: Expense[];
+  deletedExpenses?: DeletedExpense[];
 };
 
 type Screen = 'home' | 'setup';
@@ -42,11 +49,25 @@ const money = (value: number) =>
     maximumFractionDigits: 2,
   })}`;
 
+const formatDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
 export default function HomeScreen() {
   const [groupName, setGroupName] = useState('');
   const [memberName, setMemberName] = useState('');
   const [members, setMembers] = useState<string[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [deletedExpenses, setDeletedExpenses] = useState<DeletedExpense[]>([]);
 
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
@@ -58,6 +79,7 @@ export default function HomeScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [showClearModal, setShowClearModal] = useState(false);
   const [clearConfirmation, setClearConfirmation] = useState('');
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showAllExpenses, setShowAllExpenses] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -70,7 +92,13 @@ export default function HomeScreen() {
           const data: StoredData = JSON.parse(saved);
           setGroupName(data.groupName || '');
           setMembers(data.members || []);
-          setExpenses(data.expenses || []);
+          setExpenses(
+            (data.expenses || []).map((expense) => ({
+              ...expense,
+              createdAt: expense.createdAt || expense.date,
+            }))
+          );
+          setDeletedExpenses(data.deletedExpenses || []);
           setPaidBy(data.members?.[0] || '');
           setScreen(
             data.groupName && data.members?.length >= 2 ? 'home' : 'setup'
@@ -95,6 +123,7 @@ export default function HomeScreen() {
           groupName,
           members,
           expenses,
+          deletedExpenses,
         };
         await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       } catch {
@@ -103,7 +132,7 @@ export default function HomeScreen() {
     };
 
     saveData();
-  }, [groupName, members, expenses, loaded]);
+  }, [groupName, members, expenses, deletedExpenses, loaded]);
 
   const total = useMemo(
     () => expenses.reduce((sum, item) => sum + item.amount, 0),
@@ -218,13 +247,15 @@ export default function HomeScreen() {
       return;
     }
 
+    const now = new Date().toISOString();
     const newExpense: Expense = {
       id: Date.now(),
       title,
       amount,
       paidBy,
       category,
-      date: new Date().toISOString(),
+      date: now,
+      createdAt: now,
     };
 
     setExpenses((prev) => [...prev, newExpense]);
@@ -234,15 +265,32 @@ export default function HomeScreen() {
   };
 
   const deleteExpense = (id: number) => {
-    Alert.alert('Remove expense?', 'This expense will be deleted.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
-        style: 'destructive',
-        onPress: () =>
-          setExpenses((prev) => prev.filter((item) => item.id !== id)),
-      },
-    ]);
+    const expense = expenses.find((item) => item.id === id);
+    if (!expense) return;
+
+    Alert.alert(
+      'Remove expense?',
+      'This expense will be moved to History and cannot be restored.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            const deletedAt = new Date().toISOString();
+            setDeletedExpenses((prev) => [
+              {
+                ...expense,
+                deletedAt,
+                deleteReason: 'individual',
+              },
+              ...prev,
+            ]);
+            setExpenses((prev) => prev.filter((item) => item.id !== id));
+          },
+        },
+      ]
+    );
   };
 
   const getPaid = (member: string) =>
@@ -351,6 +399,8 @@ export default function HomeScreen() {
     }
 
     setExpenses([]);
+    setDeletedExpenses([]);
+    setShowHistoryModal(false);
     closeClearModal();
   };
 
@@ -368,6 +418,7 @@ export default function HomeScreen() {
             setGroupName('');
             setMembers([]);
             setExpenses([]);
+            setDeletedExpenses([]);
             setPaidBy('');
             setExpenseTitle('');
             setExpenseAmount('');
@@ -758,8 +809,11 @@ export default function HomeScreen() {
                     <Text style={styles.expenseName} numberOfLines={1}>
                       {expense.title}
                     </Text>
-                    <Text style={styles.expenseMeta} numberOfLines={1}>
+                    <Text style={styles.expenseMeta} numberOfLines={2}>
                       {expense.paidBy} • {expense.category}
+                    </Text>
+                    <Text style={styles.expenseDate} numberOfLines={1}>
+                      {formatDateTime(expense.createdAt || expense.date)}
                     </Text>
                   </View>
 
@@ -947,12 +1001,12 @@ export default function HomeScreen() {
               <Text style={styles.dangerCircleText}>!</Text>
             </View>
 
-            <Text style={styles.confirmTitle}>Clear all expenses?</Text>
+            <Text style={styles.confirmTitle}>Clear all expenses and History?</Text>
 
             <Text style={styles.confirmMessage}>
               This will permanently remove all {expenses.length}{' '}
-              {expenses.length === 1 ? 'expense' : 'expenses'}. Your group and
-              members will stay.
+              {expenses.length === 1 ? 'active expense' : 'active expenses'}
+              and the entire History. Your group and members will stay.
             </Text>
 
             <Text style={styles.confirmInstruction}>
@@ -987,9 +1041,88 @@ export default function HomeScreen() {
                 onPress={confirmClearExpenses}
                 disabled={clearConfirmation.trim().toUpperCase() !== 'CLEAR'}
               >
-                <Text style={styles.confirmClearText}>Clear Expenses</Text>
+                <Text style={styles.confirmClearText}>Clear All</Text>
               </Pressable>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* HISTORY MODAL */}
+      <Modal
+        visible={showHistoryModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowHistoryModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setShowHistoryModal(false)}
+          />
+
+          <View style={[styles.sheet, styles.historySheet]}>
+            <View style={styles.sheetHandle} />
+
+            <View style={styles.sheetHeader}>
+              <View style={styles.settingInfoHeader}>
+                <Text style={styles.sheetEyebrow}>AUDIT HISTORY</Text>
+                <Text style={styles.sheetTitle}>Deleted expenses</Text>
+              </View>
+
+              <Pressable
+                onPress={() => setShowHistoryModal(false)}
+                style={styles.closeButton}
+                hitSlop={8}
+              >
+                <Text style={styles.closeText}>×</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.historyNotice}>
+              Individual removals stay here. History cannot be manually deleted or restored.
+              Clear All Expenses removes active expenses and this History together.
+            </Text>
+
+            <ScrollView
+              style={styles.historyScroll}
+              showsVerticalScrollIndicator={false}
+            >
+              {deletedExpenses.length === 0 ? (
+                <View style={styles.historyEmpty}>
+                  <Text style={styles.historyEmptyIcon}>◷</Text>
+                  <Text style={styles.historyEmptyTitle}>History is empty</Text>
+                  <Text style={styles.historyEmptyText}>
+                    Removed expenses will appear here automatically.
+                  </Text>
+                </View>
+              ) : (
+                deletedExpenses.map((expense) => (
+                  <View style={styles.historyCard} key={`${expense.id}-${expense.deletedAt}`}>
+                    <View style={styles.historyTopRow}>
+                      <View style={styles.historyMain}>
+                        <Text style={styles.historyTitle} numberOfLines={1}>
+                          {expense.title}
+                        </Text>
+                        <Text style={styles.historyMeta}>
+                          {money(expense.amount)} • {expense.paidBy} • {expense.category}
+                        </Text>
+                      </View>
+                      <View style={styles.historyDeletedBadge}>
+                        <Text style={styles.historyDeletedBadgeText}>DELETED</Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.historyDate}>
+                      Entry date: {formatDateTime(expense.createdAt || expense.date)}
+                    </Text>
+                    <Text style={styles.historyDate}>
+                      Deleted: {formatDateTime(expense.deletedAt)}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1057,14 +1190,30 @@ export default function HomeScreen() {
               <Text style={styles.settingArrow}>›</Text>
             </Pressable>
 
+            <Pressable
+              style={styles.settingItem}
+              onPress={() => setShowHistoryModal(true)}
+            >
+              <View style={styles.settingIcon}>
+                <Text>◷</Text>
+              </View>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingTitle}>History</Text>
+                <Text style={styles.settingSubtitle}>
+                  {deletedExpenses.length} deleted expense{deletedExpenses.length === 1 ? '' : 's'}
+                </Text>
+              </View>
+              <Text style={styles.settingArrow}>›</Text>
+            </Pressable>
+
             <Pressable style={styles.settingItem} onPress={openClearModal}>
               <View style={styles.settingIcon}>
                 <Text>↺</Text>
               </View>
               <View style={styles.settingInfo}>
-                <Text style={styles.settingTitle}>Clear expenses</Text>
+                <Text style={styles.settingTitle}>Clear All Expenses</Text>
                 <Text style={styles.settingSubtitle}>
-                  Keep members, remove all expenses
+                  Clear active expenses and History together
                 </Text>
               </View>
               <Text style={styles.settingArrow}>›</Text>
@@ -1594,6 +1743,12 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
+  expenseDate: {
+    color: '#505967',
+    fontSize: 10,
+    marginTop: 4,
+  },
+
   expenseRight: {
     alignItems: 'flex-end',
   },
@@ -2087,6 +2242,107 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
     backgroundColor: '#000000',
     opacity: 0.65,
+  },
+
+  historySheet: {
+    maxHeight: '88%',
+  },
+
+  settingInfoHeader: {
+    flex: 1,
+  },
+
+  historyNotice: {
+    color: '#7E8795',
+    fontSize: 11,
+    lineHeight: 17,
+    backgroundColor: '#151920',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#242A33',
+    padding: 12,
+    marginTop: 4,
+    marginBottom: 10,
+  },
+
+  historyScroll: {
+    maxHeight: 520,
+  },
+
+  historyCard: {
+    backgroundColor: '#151920',
+    borderWidth: 1,
+    borderColor: '#292F39',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 9,
+  },
+
+  historyTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+
+  historyMain: {
+    flex: 1,
+    paddingRight: 8,
+  },
+
+  historyTitle: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+
+  historyMeta: {
+    color: '#A0A8B5',
+    fontSize: 11,
+    marginTop: 5,
+  },
+
+  historyDeletedBadge: {
+    backgroundColor: '#29171B',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+
+  historyDeletedBadgeText: {
+    color: '#FB7185',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+  },
+
+  historyDate: {
+    color: '#68717F',
+    fontSize: 10,
+    marginTop: 7,
+  },
+
+  historyEmpty: {
+    alignItems: 'center',
+    paddingVertical: 45,
+    paddingHorizontal: 20,
+  },
+
+  historyEmptyIcon: {
+    color: '#9B6CFF',
+    fontSize: 34,
+  },
+
+  historyEmptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 10,
+  },
+
+  historyEmptyText: {
+    color: '#69717E',
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 6,
   },
 
   sheet: {
