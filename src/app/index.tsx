@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -31,11 +32,17 @@ type DeletedExpense = Expense & {
   deleteReason: 'individual';
 };
 
-type StoredData = {
-  groupName: string;
+type Group = {
+  id: string;
+  name: string;
   members: string[];
   expenses: Expense[];
-  deletedExpenses?: DeletedExpense[];
+  deletedExpenses: DeletedExpense[];
+};
+
+type StoredData = {
+  groups: Group[];
+  activeGroupId: string;
 };
 
 type Screen = 'home' | 'setup';
@@ -63,6 +70,13 @@ const formatDateTime = (value: string) => {
 };
 
 export default function HomeScreen() {
+  const { setup, group: groupParam, edit: editParam } =
+    useLocalSearchParams<{
+      setup?: string;
+      group?: string;
+      edit?: string;
+    }>();
+  const router = useRouter();
   const [groupName, setGroupName] = useState('');
   const [memberName, setMemberName] = useState('');
   const [members, setMembers] = useState<string[]>([]);
@@ -75,6 +89,7 @@ export default function HomeScreen() {
   const [category, setCategory] = useState('Food');
 
   const [screen, setScreen] = useState<Screen>('setup');
+  const [activeGroupId, setActiveGroupId] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showClearModal, setShowClearModal] = useState(false);
@@ -84,26 +99,102 @@ export default function HomeScreen() {
   const [search, setSearch] = useState('');
 
   useEffect(() => {
+    if (loaded && setup === '1') {
+      setScreen('setup');
+    }
+  }, [setup, loaded]);
+
+  useEffect(() => {
     const loadData = async () => {
       try {
         const saved = await AsyncStorage.getItem(STORAGE_KEY);
 
-        if (saved) {
-          const data: StoredData = JSON.parse(saved);
-          setGroupName(data.groupName || '');
-          setMembers(data.members || []);
-          setExpenses(
-            (data.expenses || []).map((expense) => ({
+        if (!saved) {
+          setLoaded(true);
+          return;
+        }
+
+        const raw = JSON.parse(saved);
+
+        let data: StoredData;
+
+        if (raw.groups && Array.isArray(raw.groups)) {
+          data = raw;
+        } else {
+          const migratedGroup: Group = {
+            id: `group-${Date.now()}`,
+            name: raw.groupName || '',
+            members: raw.members || [],
+            expenses: (raw.expenses || []).map((expense: Expense) => ({
               ...expense,
               createdAt: expense.createdAt || expense.date,
-            }))
-          );
-          setDeletedExpenses(data.deletedExpenses || []);
-          setPaidBy(data.members?.[0] || '');
-          setScreen(
-            data.groupName && data.members?.length >= 2 ? 'home' : 'setup'
+            })),
+            deletedExpenses: raw.deletedExpenses || [],
+          };
+
+          data = {
+            groups: [migratedGroup],
+            activeGroupId: migratedGroup.id,
+          };
+
+          await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        }
+
+        if (!data.groups.length) {
+          setActiveGroupId('');
+          setGroupName('');
+          setMembers([]);
+          setExpenses([]);
+          setDeletedExpenses([]);
+          setPaidBy('');
+          setScreen('setup');
+          setLoaded(true);
+          return;
+        }
+
+        const selectedGroupId = groupParam || data.activeGroupId;
+
+        const activeGroup =
+          data.groups.find((group) => group.id === selectedGroupId) ||
+          data.groups[0];
+
+        if (!activeGroup) {
+          setLoaded(true);
+          return;
+        }
+
+        setActiveGroupId(activeGroup.id);
+        setGroupName(activeGroup.name);
+        setMembers(activeGroup.members);
+        setExpenses(activeGroup.expenses);
+        setDeletedExpenses(activeGroup.deletedExpenses || []);
+        setPaidBy(activeGroup.members[0] || '');
+
+        setExpenseTitle('');
+        setExpenseAmount('');
+        setCategory('Food');
+        setSearch('');
+        setShowAllExpenses(false);
+        setShowHistoryModal(false);
+        setShowClearModal(false);
+
+        if (data.activeGroupId !== activeGroup.id) {
+          await AsyncStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+              groups: data.groups,
+              activeGroupId: activeGroup.id,
+            })
           );
         }
+
+        setScreen(
+          setup === '1' ||
+          !activeGroup.name ||
+          activeGroup.members.length < 2
+            ? 'setup'
+            : 'home'
+        );
       } catch {
         Alert.alert('Could not load data', 'Starting with a fresh group.');
       } finally {
@@ -112,27 +203,59 @@ export default function HomeScreen() {
     };
 
     loadData();
-  }, []);
+  }, [groupParam, setup, editParam]);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !activeGroupId) return;
 
     const saveData = async () => {
       try {
-        const data: StoredData = {
-          groupName,
+        const saved = await AsyncStorage.getItem(STORAGE_KEY);
+
+        if (!saved) return;
+
+        const existing: StoredData = JSON.parse(saved);
+        const groups = Array.isArray(existing.groups)
+          ? existing.groups
+          : [];
+
+        const updatedGroup: Group = {
+          id: activeGroupId,
+          name: groupName,
           members,
           expenses,
           deletedExpenses,
         };
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+
+        const updatedGroups = groups.some(
+          (group) => group.id === activeGroupId
+        )
+          ? groups.map((group) =>
+              group.id === activeGroupId ? updatedGroup : group
+            )
+          : [...groups, updatedGroup];
+
+        await AsyncStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            groups: updatedGroups,
+            activeGroupId,
+          })
+        );
       } catch {
         // Keep the app usable even if storage temporarily fails.
       }
     };
 
     saveData();
-  }, [groupName, members, expenses, deletedExpenses, loaded]);
+  }, [
+    activeGroupId,
+    groupName,
+    members,
+    expenses,
+    deletedExpenses,
+    loaded,
+  ]);
 
   const total = useMemo(
     () => expenses.reduce((sum, item) => sum + item.amount, 0),
@@ -218,7 +341,7 @@ export default function HomeScreen() {
     );
   };
 
-  const createGroup = () => {
+  const createGroup = async () => {
     const cleanName = groupName.trim();
 
     if (!cleanName) {
@@ -231,8 +354,52 @@ export default function HomeScreen() {
       return;
     }
 
-    setPaidBy((current) => current || members[0]);
-    setScreen('home');
+    try {
+      const saved = await AsyncStorage.getItem(STORAGE_KEY);
+
+      const existing: StoredData = saved
+        ? JSON.parse(saved)
+        : { groups: [], activeGroupId: '' };
+
+      const groupId = activeGroupId || `group-${Date.now()}`;
+
+      const updatedGroup: Group = {
+        id: groupId,
+        name: cleanName,
+        members,
+        expenses,
+        deletedExpenses,
+      };
+
+      const groups = Array.isArray(existing.groups)
+        ? existing.groups
+        : [];
+
+      const updatedGroups = groups.some(
+        (group) => group.id === groupId
+      )
+        ? groups.map((group) =>
+            group.id === groupId ? updatedGroup : group
+          )
+        : [...groups, updatedGroup];
+
+      await AsyncStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          groups: updatedGroups,
+          activeGroupId: groupId,
+        })
+      );
+
+      setActiveGroupId(groupId);
+      setGroupName(cleanName);
+      setPaidBy((current) => current || members[0]);
+      setScreen('home');
+
+      router.replace(`/?group=${encodeURIComponent(groupId)}`);
+    } catch {
+      Alert.alert('Error', 'Could not save the group.');
+    }
   };
 
   const addExpense = () => {
@@ -414,16 +581,68 @@ export default function HomeScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await AsyncStorage.removeItem(STORAGE_KEY);
-            setGroupName('');
-            setMembers([]);
-            setExpenses([]);
-            setDeletedExpenses([]);
-            setPaidBy('');
-            setExpenseTitle('');
-            setExpenseAmount('');
-            setScreen('setup');
-            setShowSettings(false);
+            try {
+              const saved = await AsyncStorage.getItem(STORAGE_KEY);
+
+              if (!saved) {
+                setScreen('setup');
+                setShowSettings(false);
+                return;
+              }
+
+              const parsed: StoredData = JSON.parse(saved);
+
+              const remainingGroups = parsed.groups.filter(
+                (group) => group.id !== activeGroupId
+              );
+
+              if (remainingGroups.length === 0) {
+                await AsyncStorage.removeItem(STORAGE_KEY);
+
+                setActiveGroupId('');
+                setGroupName('');
+                setMembers([]);
+                setExpenses([]);
+                setDeletedExpenses([]);
+                setPaidBy('');
+                setExpenseTitle('');
+                setExpenseAmount('');
+                setScreen('setup');
+                setShowSettings(false);
+                return;
+              }
+
+              const nextGroup = remainingGroups[0];
+
+              await AsyncStorage.setItem(
+                STORAGE_KEY,
+                JSON.stringify({
+                  groups: remainingGroups,
+                  activeGroupId: nextGroup.id,
+                })
+              );
+
+              setActiveGroupId(nextGroup.id);
+              setGroupName(nextGroup.name);
+              setMembers(nextGroup.members);
+              setExpenses(nextGroup.expenses);
+              setDeletedExpenses(nextGroup.deletedExpenses || []);
+              setPaidBy(nextGroup.members[0] || '');
+              setExpenseTitle('');
+              setExpenseAmount('');
+              setSearch('');
+              setShowAllExpenses(false);
+              setShowHistoryModal(false);
+              setShowClearModal(false);
+              setShowSettings(false);
+              setScreen(
+                !nextGroup.name || nextGroup.members.length < 2
+                  ? 'setup'
+                  : 'home'
+              );
+            } catch {
+              Alert.alert('Error', 'Could not delete group.');
+            }
           },
         },
       ]
@@ -586,16 +805,6 @@ export default function HomeScreen() {
               </Text>
             </View>
 
-            <Pressable
-              style={({ pressed }) => [
-                styles.settingsButton,
-                pressed && styles.settingsPressed,
-              ]}
-              onPress={() => setShowSettings(true)}
-              hitSlop={8}
-            >
-              <Text style={styles.settingsIcon}>⚙</Text>
-            </Pressable>
           </View>
 
           {/* SUMMARY */}

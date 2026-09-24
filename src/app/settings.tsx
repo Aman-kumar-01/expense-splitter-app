@@ -3,6 +3,8 @@ import { useFocusEffect } from 'expo-router';
 import {
   Alert,
   Modal,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   Share,
@@ -30,11 +32,17 @@ type DeletedExpense = Expense & {
   deleteReason: 'individual';
 };
 
-type StoredData = {
-  groupName: string;
+type Group = {
+  id: string;
+  name: string;
   members: string[];
   expenses: Expense[];
-  deletedExpenses?: DeletedExpense[];
+  deletedExpenses: DeletedExpense[];
+};
+
+type StoredData = {
+  groups: Group[];
+  activeGroupId: string;
 };
 
 const STORAGE_KEY = '@expense_splitter_data_v2';
@@ -58,8 +66,9 @@ const formatDateTime = (value: string) => {
 };
 
 export default function SettingsScreen() {
-  const [data, setData] = useState<StoredData>({
-    groupName: '',
+  const [data, setData] = useState<Group>({
+    id: '',
+    name: '',
     members: [],
     expenses: [],
     deletedExpenses: [],
@@ -68,6 +77,10 @@ export default function SettingsScreen() {
   const [showHistory, setShowHistory] = useState(false);
   const [showClear, setShowClear] = useState(false);
   const [confirmation, setConfirmation] = useState('');
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [showGroups, setShowGroups] = useState(false);
+  const [showNewGroup, setShowNewGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
 
   const loadData = async () => {
     try {
@@ -76,12 +89,17 @@ export default function SettingsScreen() {
       if (saved) {
         const parsed: StoredData = JSON.parse(saved);
 
-        setData({
-          groupName: parsed.groupName || '',
-          members: parsed.members || [],
-          expenses: parsed.expenses || [],
-          deletedExpenses: parsed.deletedExpenses || [],
-        });
+        const activeGroup =
+          parsed.groups?.find((group) => group.id === parsed.activeGroupId) ||
+          parsed.groups?.[0];
+
+        if (activeGroup) {
+          setGroups(parsed.groups || []);
+          setData({
+            ...activeGroup,
+            deletedExpenses: activeGroup.deletedExpenses || [],
+          });
+        }
       }
     } catch {
       Alert.alert('Error', 'Could not load settings.');
@@ -94,6 +112,72 @@ export default function SettingsScreen() {
     }, [])
   );
 
+  const switchGroup = async (group: Group) => {
+    try {
+      const saved = await AsyncStorage.getItem(STORAGE_KEY);
+      if (!saved) return;
+
+      const parsed: StoredData = JSON.parse(saved);
+
+      await AsyncStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          groups: parsed.groups,
+          activeGroupId: group.id,
+        })
+      );
+
+      setData(group);
+      setGroups(parsed.groups);
+      setShowGroups(false);
+      router.replace(`/?group=${encodeURIComponent(group.id)}`);
+    } catch {
+      Alert.alert('Error', 'Could not switch group.');
+    }
+  };
+
+  const createGroup = async () => {
+    const name = newGroupName.trim();
+
+    if (!name) {
+      Alert.alert('Group name required', 'Enter a name for the new group.');
+      return;
+    }
+
+    try {
+      const saved = await AsyncStorage.getItem(STORAGE_KEY);
+
+      const parsed: StoredData = saved
+        ? JSON.parse(saved)
+        : { groups: [], activeGroupId: '' };
+
+      const newGroup: Group = {
+        id: `group-${Date.now()}`,
+        name,
+        members: [],
+        expenses: [],
+        deletedExpenses: [],
+      };
+
+      const updated: StoredData = {
+        groups: [...parsed.groups, newGroup],
+        activeGroupId: newGroup.id,
+      };
+
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+
+      setGroups(updated.groups);
+      setData(newGroup);
+      setNewGroupName('');
+      setShowNewGroup(false);
+      setShowGroups(false);
+
+      router.replace(`/?group=${encodeURIComponent(newGroup.id)}&setup=1`);
+    } catch {
+      Alert.alert('Error', 'Could not create group.');
+    }
+  };
+
   const shareSummary = async () => {
     const total = data.expenses.reduce(
       (sum, expense) => sum + expense.amount,
@@ -105,7 +189,7 @@ export default function SettingsScreen() {
       : 0;
 
     const text = [
-      data.groupName || 'Expense Splitter',
+      data.name || 'Expense Splitter',
       '',
       `Total spent: ${money(total)}`,
       `Members: ${data.members.length}`,
@@ -128,14 +212,36 @@ export default function SettingsScreen() {
     if (confirmation.trim().toUpperCase() !== 'CLEAR') return;
 
     try {
-      const updated = {
+      const saved = await AsyncStorage.getItem(STORAGE_KEY);
+      if (!saved) return;
+
+      const parsed: StoredData = JSON.parse(saved);
+
+      const groups = parsed.groups.map((group) =>
+        group.id === data.id
+          ? {
+              ...group,
+              expenses: [],
+              deletedExpenses: [],
+            }
+          : group
+      );
+
+      const updatedData = {
         ...data,
         expenses: [],
         deletedExpenses: [],
       };
 
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      setData(updated);
+      await AsyncStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          groups,
+          activeGroupId: parsed.activeGroupId,
+        })
+      );
+
+      setData(updatedData);
       setConfirmation('');
       setShowClear(false);
     } catch {
@@ -153,8 +259,37 @@ export default function SettingsScreen() {
           text: 'Delete group',
           style: 'destructive',
           onPress: async () => {
-            await AsyncStorage.removeItem(STORAGE_KEY);
-            router.replace('/');
+            try {
+              const saved = await AsyncStorage.getItem(STORAGE_KEY);
+              if (!saved) return;
+
+              const parsed: StoredData = JSON.parse(saved);
+
+              const remainingGroups = parsed.groups.filter(
+                (group) => group.id !== data.id
+              );
+
+              if (remainingGroups.length === 0) {
+                await AsyncStorage.removeItem(STORAGE_KEY);
+                router.replace('/?setup=1');
+              } else {
+                const nextGroup = remainingGroups[0];
+
+                await AsyncStorage.setItem(
+                  STORAGE_KEY,
+                  JSON.stringify({
+                    groups: remainingGroups,
+                    activeGroupId: nextGroup.id,
+                  })
+                );
+
+                router.replace(
+                  `/?group=${encodeURIComponent(nextGroup.id)}`
+                );
+              }
+            } catch {
+              Alert.alert('Error', 'Could not delete group.');
+            }
           },
         },
       ]
@@ -170,9 +305,72 @@ export default function SettingsScreen() {
         <Text style={styles.eyebrow}>GROUP SETTINGS</Text>
         <Text style={styles.title}>Manage your group</Text>
 
+        <View style={styles.groupsSection}>
+          <View style={styles.groupsHeader}>
+            <View>
+              <Text style={styles.sectionTitle}>My Groups</Text>
+              <Text style={styles.sectionSubtitle}>
+                Switch between your expense groups
+              </Text>
+            </View>
+
+            <Pressable
+              style={styles.addGroupButton}
+              onPress={() => {
+                setNewGroupName('');
+                setShowNewGroup(true);
+              }}
+            >
+              <Text style={styles.addGroupText}>+ New</Text>
+            </Pressable>
+          </View>
+
+          {groups.map((group) => (
+            <Pressable
+              key={group.id}
+              style={[
+                styles.groupCard,
+                group.id === data.id && styles.activeGroupCard,
+              ]}
+              onPress={() => switchGroup(group)}
+            >
+              <View style={styles.groupAvatar}>
+                <Text style={styles.groupAvatarText}>
+                  {group.name.trim().charAt(0).toUpperCase() || '?'}
+                </Text>
+              </View>
+
+              <View style={styles.groupInfo}>
+                <Text style={styles.groupName}>{group.name}</Text>
+                <Text style={styles.groupMeta}>
+                  {group.members.length} member
+                  {group.members.length === 1 ? '' : 's'} •{' '}
+                  {group.expenses.length} expense
+                  {group.expenses.length === 1 ? '' : 's'}
+                </Text>
+              </View>
+
+              {group.id === data.id && (
+                <View style={styles.activeBadge}>
+                  <Text style={styles.activeBadgeText}>Active</Text>
+                </View>
+              )}
+            </Pressable>
+          ))}
+        </View>
+
         <Pressable
           style={styles.settingItem}
-          onPress={() => router.replace('/?setup=1')}
+          onPress={() =>
+            router.navigate({
+              pathname: '/',
+              params: {
+                group: data.id,
+                setup: '1',
+                edit: String(Date.now()),
+              },
+            })
+          }
         >
           <View style={styles.settingIcon}>
             <Text>✎</Text>
@@ -261,6 +459,62 @@ export default function SettingsScreen() {
           <Text style={styles.dangerArrow}>›</Text>
         </Pressable>
       </ScrollView>
+
+      <Modal
+        visible={showNewGroup}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowNewGroup(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.keyboardAvoiding}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.overlay}>
+            <View style={styles.confirmCard}>
+            <Text style={styles.eyebrow}>NEW GROUP</Text>
+            <Text style={styles.modalTitle}>Create a new group</Text>
+
+            <Text style={styles.message}>
+              Give your new group a name. You can add members next.
+            </Text>
+
+            <TextInput
+              value={newGroupName}
+              onChangeText={setNewGroupName}
+              placeholder="e.g. Goa Trip"
+              placeholderTextColor="#69717E"
+              autoCapitalize="words"
+              autoCorrect={false}
+              style={styles.input}
+            />
+
+            <View style={styles.actions}>
+              <Pressable
+                style={styles.cancel}
+                onPress={() => {
+                  setNewGroupName('');
+                  setShowNewGroup(false);
+                }}
+              >
+                <Text style={styles.cancelText}>Cancel</Text>
+              </Pressable>
+
+              <Pressable
+                style={[
+                  styles.clear,
+                  !newGroupName.trim() && styles.disabled,
+                ]}
+                disabled={!newGroupName.trim()}
+                onPress={createGroup}
+              >
+                <Text style={styles.clearText}>Create</Text>
+              </Pressable>
+            </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       <Modal
         visible={showHistory}
@@ -393,6 +647,90 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 28,
   },
+  groupsSection: {
+    marginBottom: 20,
+  },
+  groupsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  sectionTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  sectionSubtitle: {
+    color: '#858B98',
+    fontSize: 12,
+    marginTop: 3,
+  },
+  addGroupButton: {
+    backgroundColor: '#211735',
+    borderWidth: 1,
+    borderColor: '#5B3A86',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  addGroupText: {
+    color: '#C89BFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  groupCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#111318',
+    borderWidth: 1,
+    borderColor: '#292D35',
+    borderRadius: 16,
+    padding: 13,
+    marginBottom: 8,
+  },
+  activeGroupCard: {
+    borderColor: '#7047A8',
+    backgroundColor: '#15121D',
+  },
+  groupAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    backgroundColor: '#211735',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupAvatarText: {
+    color: '#C89BFF',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  groupInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  groupName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  groupMeta: {
+    color: '#858B98',
+    fontSize: 12,
+    marginTop: 3,
+  },
+  activeBadge: {
+    backgroundColor: '#2B1B43',
+    borderRadius: 9,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  activeBadgeText: {
+    color: '#C89BFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   settingItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -449,6 +787,10 @@ const styles = StyleSheet.create({
   dangerItem: {
     borderColor: '#4A252B',
   },
+  keyboardAvoiding: {
+    flex: 1,
+  },
+
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.72)',

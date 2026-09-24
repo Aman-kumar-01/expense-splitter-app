@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "expense-splitter-app",
+    "name": "Expense-Splitter",
     "slug": "expense-splitter-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,15 +8,9 @@
     "scheme": "expensesplitterapp",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/images/icon.png"
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
-      },
       "predictiveBackGestureEnabled": false,
       "package": "com.aman950898.expensesplitterapp"
     },
